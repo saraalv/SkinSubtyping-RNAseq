@@ -1,0 +1,453 @@
+---
+title: "Predicción de subtipos de cáncer de piel"
+author: "Sara Álvarez Estévez"
+date: "2024-06-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, comment = NULL)
+```
+
+# Introducción
+
+El cáncer es una enfermedad caracterizada por el crecimiento descontrolado de células anormales en el cuerpo. Estas células pueden invadir y destruir el tejido sano circundante y, en algunos casos, diseminarse a otras partes del cuerpo a través del sistema linfático o sanguíneo, un proceso conocido como metástasis. 
+
+El desarrollo del cáncer generalmente implica una serie de cambios genéticos que pueden ser heredados, causados por factores ambientales, o resultar de errores en la replicación del ADN. Estos cambios afectan genes que regulan el crecimiento y división celular, como oncogenes (que promueven el crecimiento celular) y genes supresores de tumores (que frenan el crecimiento celular). Estos cambios genéticos pueden ser detectados a través del análisis de la expresión del mRNA. 
+
+El estudio que se presenta corresponde a 150 muestras de RNA-seq de tejido epitelial con cáncer, que han sido normalizados y prefiltrados. Los datos estan recogidos en el fichero rna1.csv. La primera columna contiene el subtipo de cáncer de piel: tipus1, tipus2 y tipus 3 y el resto de columnas la expresión normalizada de genes preseleccionados. 
+
+# Objetivo
+
+El objetivo es predecir el subtipo de cáncer de piel de los pacientes a partir de la información recogida en un estudio de RNA-seq.
+
+
+# Obtención de los datos 
+
+```{r}
+rna1<- read.csv("rna1.csv")
+```
+
+# Análisis Exploratorio
+
+```{r}
+dim(rna1)
+```
+Vemos que tenemos un dataset con `r dim(rna1)[2]` variables provenientes de `r dim(rna1)[1]` muestras.  
+
+Comprobamos si hay valores ausentes:
+
+```{r}
+table(is.na(rna1))
+```
+No existen valores ausentes en el dataset, por lo que podemos seguir con nuestro análisis exploratorio. 
+Primero comprobamos cuantos registros tenemos para cada tipo de cáncer
+```{r}
+table(rna1$Class)
+```
+Vemos que tenemos un tamaño muestral similar para el tipo 1 y el tipo 2, mientras que tenemos bastantes más muestras en el tipo 3. 
+
+A continuación, puede ser interesante observar la distribución de las distintas variables. 
+```{r}
+summary(rna1[c(1:3,20:23,199:201)])
+```
+```{r}
+col <- c("deepskyblue", "deepskyblue2","deepskyblue4", "darkslategray4", "darkseagreen4", "darkseagreen", "darkseagreen3","darkseagreen2","honeydew", "lemonchiffon","khaki1", "tan1", "coral", "salmon", "darksalmon", "peachpuff", "mistyrose", "pink", "palevioletred1","violetred2")
+i <- 2
+while (i <=182){
+  boxplot(rna1[i:(i+19)], las = 2, col = col)
+  i <- i+20
+}
+```
+
+```{r}
+set.seed(12345)
+par(mfrow=c(1,2))
+nums <- sample(201,12)
+for (i in nums){
+  boxplot(rna1[,i]~rna1[,1], xlab = "Tipo de cáncer", ylab = colnames(rna1[i]), col = c("deepskyblue4", "gray","darkseagreen4"))
+}
+```
+Visualizamos la distribución de las expresiones de algunos de los genes según el tipo de cáncer, y, como podemos observar, para algunos de estos genes su expresión varía bastante de un grupo a otro. Otros, como el CSF1R tienen una distribución muy similar entre los distintos grupos.
+
+# Análisis de componentes principales 
+
+```{r}
+cprna <- prcomp(rna1[-1])
+# calculamos el porcentaje de variación explicado por cada componente principal
+loads <- round(cprna$sdev^2/sum(cprna$sdev^2)*100,1)
+
+# representamos gráficamente las diferentes muestras según sus dos primeros CPs. 
+xlab <- c(paste("PC1",loads[1],"%"))
+ylab <- c(paste("PC2",loads[2],"%"))
+colores<- c("deepskyblue4","gray","darkseagreen4")
+plot(cprna$x[,1:2], xlab = xlab, ylab = ylab, col = colores[factor(rna1$Class)], pch = 19)
+title("Gráficos de los 2 primero componentes\n principales en el dataset RNA1")
+legend("topright", legend = levels(factor(rna1$Class)),
+      pch = 19,
+      col = colores,
+      cex = 1)
+```
+
+Vemos una clara separación por grupos a lo largo del eje horizontal, ya que las muetsras de tipo 1 tienen a estar hacia la derecha, las de tipo 2 en la zona central y las de tipo 3 en la izquierda.
+
+# Preparación de los datos 
+
+Para comenzar, como algunos de los algoritmos que utilizaremos solo aceptan variables numéricas o categóricas, transformaremos la variable `Class` de `character` a `factor`:
+```{r}
+rna1$Class <- as.factor(rna1$Class)
+```
+
+A continuación, crearemos nuestro training y test datasets dividiendo los datos en 2/3 training y 1/3 test.
+
+```{r}
+set.seed(12345)
+ntrain <- (2/3)*length(rna1$RTN2)
+numtrain <- sample(length(rna1$RTN2),ntrain)
+# para algunos algoritmos podremos utilizar el dataset completo y dividir únicamente en training y test 
+rna1ds_train <- rna1[numtrain,]
+rna1ds_test <- rna1[-numtrain,]
+# mientras que en otros necesitaremos separar los datos de sus estiquetas. 
+rna1_train <- rna1[numtrain,-1]
+rna1_test <- rna1[-numtrain,-1]
+labels_train <- rna1[numtrain,1]
+labels_test <- rna1[-numtrain,1]
+```
+
+Comprobamos que hay una distribución similar de los tres tipos de cáncer tanto en el train como en el test dataset.
+
+```{r}
+prop.table(table(rna1ds_train$Class))
+```
+```{r}
+prop.table(table(rna1ds_test$Class))
+```
+
+# Entrenando los modelos sobre los datos 
+
+En esta sección probaremos diferentes clasificadores para los datos sobre el cáncer de piel: 
+
+## k-Nearest Neighbour (k-NN)
+
+Antes de aplicar el algoritmo k-NN necesitamos normalizar los datos. Esto de debe a que este algoritmo, se basa en el cálculo de distancias, y estas distancias son altamente dependientes de como son memdidas las características. Si una de nuestras variables tiene un rango de valores mucho más alto que otra, la medida de la distancia se verá dominada por esta. Como pudimos observar en el análisis exploratorio, algunos de los genes tienen distribuciones muy distintas entre sí, por lo que optaremos por la normalización de los datos:
+
+```{r}
+# creamos na función de normalización minmax
+normalize <- function(x){
+  return((x-min(x))/(max(x)-min(x)))
+}
+```
+
+De esta forma, ahora todos los valores oscilaran entre 0 y 1.
+
+```{r}
+rna_train_n <- as.data.frame(lapply(rna1_train,normalize))
+rna_test_n <- as.data.frame(lapply(rna1_test,normalize))
+```
+
+Comprobamos la correcta normalización con alguna de las variables:
+
+```{r}
+summary(rna_train_n$RTN2)
+```
+```{r}
+summary(rna_test_n$RTN2)
+```
+
+```{r}
+library(class)
+library(caret)
+knn1 <- knn(train = rna_train_n, test = rna_test_n, cl = labels_train, k = 1)
+confusionMatrix(knn1, labels_test)
+```
+```{r include=FALSE}
+cm <- confusionMatrix(knn1, labels_test)
+m1 <- c(cm$overall[c(1,2)],cm$byClass[c(1,4,2,5,3,6)] )
+```
+
+```{r}
+knn3 <- knn(train = rna_train_n, test = rna_test_n, cl = labels_train, k = 3)
+confusionMatrix(knn3, labels_test)
+```
+```{r include=FALSE}
+cm <- confusionMatrix(knn3, labels_test)
+m3 <- c(cm$overall[c(1,2)],cm$byClass[c(1,4,2,5,3,6)] )
+```
+
+```{r}
+knn5 <- knn(train = rna_train_n, test = rna_test_n, cl = labels_train, k = 5)
+confusionMatrix(knn5, labels_test)
+```
+```{r include=FALSE}
+cm <- confusionMatrix(knn5, labels_test)
+m5 <- c(cm$overall[c(1,2)],cm$byClass[c(1,4,2,5,3,6)] )
+```
+
+```{r}
+knn7 <- knn(train = rna_train_n, test = rna_test_n, cl = labels_train, k = 7)
+confusionMatrix(knn7, labels_test)
+```
+```{r include=FALSE}
+cm <- confusionMatrix(knn7, labels_test)
+m7 <- c(cm$overall[c(1,2)],cm$byClass[c(1,4,2,5,3,6)] )
+```
+
+```{r}
+knn11 <- knn(train = rna_train_n, test = rna_test_n, cl = labels_train, k = 11)
+confusionMatrix(knn11, labels_test)
+```
+
+```{r include=FALSE}
+cm <- confusionMatrix(knn11, labels_test)
+m11 <- c(cm$overall[c(1,2)],cm$byClass[c(1,4,2,5,3,6)] )
+```
+
+```{r echo=FALSE}
+library(kableExtra)
+tablaknn <- rbind(m1,m3,m5,m7,m11)
+colnames(tablaknn) <- c("Accuracy", "Kappa", "Sensibilidad T1", "Especificidad T1", "Sensibilidad T2", "Especificidad T2", "Sensibilidad T3", "Especificidad T3")
+rownames(tablaknn) <- c("K=1","K=3","K=5","K=7","K=11")
+Form.Basic <- c("striped", "hover", "condensed", "responsive")
+kable(tablaknn) %>%
+  kable_styling(bootstrap_options = Form.Basic)%>%
+  row_spec(0, bold = T, color = "white", background = "seagreen3")%>%
+  column_spec(1, bold = T)
+```
+```{r include=FALSE}
+best_knn <- m1
+```
+
+En general, conseguimos una actuación muy buena de todos los algoritmos, ya que todos tienen valores elevados tanto para la accuracy como para el estadístico kappa. Sin embargo, podemos observar, el algoritmo que mejor resultado nos da es aquel en el que la k toma el valor 1, ya que en este caso todas las métricas son máximas. Si aumentamos el valor de k, algunos de la sensibilidad y especificidad algunos grupos se ve afectada, especialmente la sensibilidad del tipo 2, que disminuye drásticamente de 0.818 a 0.545 cuando la k pasa de k = 1 a k = 3.
+
+## NaiveBayes
+```{r}
+library(e1071)
+rna_naiveB <- naiveBayes(rna1_train, labels_train, laplace = 0)
+```
+```{r}
+rna_naiveB_pred <- predict(rna_naiveB, rna1_test)
+confusionMatrix(rna_naiveB_pred, labels_test)
+```
+```{r include=FALSE}
+cm <- confusionMatrix(rna_naiveB_pred, labels_test)
+mnb <- c(cm$overall[c(1,2)],cm$byClass[c(1,4,2,5,3,6)] )
+```
+
+
+```{r}
+rna_naiveB1 <- naiveBayes(rna1_train, labels_train, laplace = 1)
+rna_naiveB_pred1 <- predict(rna_naiveB1, rna1_test)
+confusionMatrix(rna_naiveB_pred1, labels_test)
+```
+```{r include=FALSE}
+cm <- confusionMatrix(rna_naiveB_pred1, labels_test)
+mnb1 <- c(cm$overall[c(1,2)],cm$byClass[c(1,4,2,5,3,6)] )
+tablaNB <- rbind(mnb,mnb1)
+colnames(tablaNB) <- c("Accuracy", "Kappa", "Sensibilidad T1", "Especificidad T1", "Sensibilidad T2", "Especificidad T2", "Sensibilidad T3", "Especificidad T3")
+rownames(tablaNB) <- c("Laplace = 0", "Laplace = 1")
+```
+
+```{r echo=FALSE}
+kable(tablaNB) %>%
+  kable_styling(bootstrap_options = Form.Basic) %>%
+  row_spec(0, bold = T, color = "white", background = "seagreen3")%>%
+  column_spec(1, bold = T)
+```
+```{r include=FALSE}
+best_NB <- mnb1
+```
+
+En este caso observamos que tanto con el valor de laplace 0 o 1, obtenemos el mismo resultado.
+
+## Neural network
+
+La parte de Neural Network se encuentra en el archivo adjunto python notebook, ya que por problemas de almacenamiento en el dispositivo no me permite utilizar keras ni tensorflow en R. 
+
+```{r echo=FALSE}
+nn1 <- c(0.92, " " ,1,0.93,0.88,0.70,0.89,1)
+nn2 <- c(0.94, " ", 1,0.93,0.89,0.80,0.93,1)
+tablann <- rbind(nn1,nn2)
+colnames(tablann) <- c("Accuracy", "Kappa", "Sensibilidad T1", "Especificidad T1", "Sensibilidad T2", "Especificidad T2", "Sensibilidad T3", "Especificidad T3")
+rownames(tablann) <- c("1 capa oculta 30 nodos", "2 capas ocultas 50 y 30 nodos")
+kable(tablann) %>%
+  kable_styling(bootstrap_options = Form.Basic)%>%
+  row_spec(0, bold = T, color = "white", background = "seagreen3")%>%
+  column_spec(1, bold = T)
+```
+Podemos ver que aunque ambas redes dan muy buenos resultados, estos son ligeramente mejores cuando trabajamos con dos capas ocultas. 
+
+```{r include=FALSE}
+best_nn <- nn2
+```
+
+## Suppor Vector Machine 
+
+```{r}
+library(kernlab)
+```
+```{r}
+# modelo lineal
+cancer_linear_classifier <- ksvm(Class ~., data = rna1ds_train, kernel = "vanilladot")
+```
+```{r}
+cancer_linear_classifier
+```
+```{r}
+linear_predictions <- predict(cancer_linear_classifier, rna1ds_test)
+confusionMatrix(linear_predictions, labels_test)
+```
+```{r include=FALSE}
+cm <- confusionMatrix(linear_predictions, labels_test)
+ml <- c(cm$overall[c(1,2)],cm$byClass[c(1,4,2,5,3,6)] )
+```
+
+```{r}
+# modelo gausiano
+cancer_gaussian_classifier <- ksvm (Class ~., data = rna1ds_train, kernel = "rbfdot")
+cancer_gaussian_classifier
+```
+```{r}
+gaussian_predictions <- predict(cancer_gaussian_classifier, rna1ds_test)
+confusionMatrix(gaussian_predictions, labels_test)
+```
+```{r include=FALSE}
+cm <- confusionMatrix(gaussian_predictions, labels_test)
+mg <- c(cm$overall[c(1,2)],cm$byClass[c(1,4,2,5,3,6)] )
+tablaVM <- rbind(ml,mg)
+colnames(tablaVM) <- c("Accuracy", "Kappa", "Sensibilidad T1", "Especificidad T1", "Sensibilidad T2", "Especificidad T2", "Sensibilidad T3", "Especificidad T3")
+rownames(tablaVM) <- c("Kernel lineal", "Kernel rbf")
+```
+```{r echo=FALSE}
+kable(tablaVM) %>%
+  kable_styling(bootstrap_options = Form.Basic)%>%
+  row_spec(0, bold = T, color = "white", background = "seagreen3")%>%
+  column_spec(1, bold = T)
+```
+
+```{r include=FALSE}
+best_VM <- ml
+```
+
+Vemos que el modelo que mejor se adapta a nuestros datos es aquel con un kernel lineal, ya que todas las métricas son iguales o más altas, viendo, de nuevo, una gran diferencia en la sensibilidad para el tipo 2, que disminuye de 0.727 a 0.545 cuando cambiamos el kernel.
+
+## Árboles de clasificación 
+
+```{r}
+library(C50)
+cancerc50 <- C5.0(rna1_train, labels_train)
+cancerc50
+```
+```{r}
+summary(cancerc50)
+```
+```{r}
+c50_pred <- predict(cancerc50, rna1_test)
+confusionMatrix(c50_pred,labels_test)
+```
+```{r include=FALSE}
+cm <- confusionMatrix(c50_pred,labels_test)
+ma <- c(cm$overall[c(1,2)],cm$byClass[c(1,4,2,5,3,6)] )
+```
+
+```{r}
+c50boost10 <- C5.0(rna1_train, labels_train, trials = 10, control = C5.0Control(earlyStopping = FALSE))
+c50boost10
+```
+```{r}
+summary(c50boost10)
+```
+```{r}
+cancerboost_pred <- predict(c50boost10, rna1_test)
+confusionMatrix(cancerboost_pred, labels_test)
+```
+```{r include=FALSE}
+cm <- confusionMatrix(cancerboost_pred, labels_test)
+mab <- c(cm$overall[c(1,2)],cm$byClass[c(1,4,2,5,3,6)] )
+tablaAC <- rbind(ma,mab)
+colnames(tablaAC) <- c("Accuracy", "Kappa", "Sensibilidad T1", "Especificidad T1", "Sensibilidad T2", "Especificidad T2", "Sensibilidad T3", "Especificidad T3")
+rownames(tablaAC) <- c("Sin boost", "Boost = 10")
+```
+```{r echo=FALSE}
+kable(tablaAC) %>%
+  kable_styling(bootstrap_options = Form.Basic)%>%
+  row_spec(0, bold = T, color = "white", background = "seagreen3")%>%
+  column_spec(1, bold = T)
+```
+```{r include=FALSE}
+best_AC <- mab
+```
+
+## Random Forest
+
+```{r}
+library(randomForest)
+```
+```{r}
+set.seed(12345)
+rf100 <- randomForest(Class~., data = rna1ds_train, ntree = 100)
+rf100
+```
+```{r}
+rf100_pred <- predict(rf100, rna1ds_test)
+confusionMatrix(rf100_pred,labels_test)
+```
+```{r}
+cm <- confusionMatrix(rf100_pred,labels_test)
+m100 <- c(cm$overall[c(1,2)],cm$byClass[c(1,4,2,5,3,6)] )
+```
+
+```{r}
+rf200 <- randomForest(Class~., data = rna1ds_train, ntree = 200)
+rf200
+```
+```{r}
+rf200_pred <- predict(rf200, rna1ds_test)
+confusionMatrix(rf200_pred,labels_test)
+```
+
+```{r include=FALSE}
+cm <- confusionMatrix(rf200_pred,labels_test)
+m200 <- c(cm$overall[c(1,2)],cm$byClass[c(1,4,2,5,3,6)] )
+tablaRF <- rbind(ma,mab)
+colnames(tablaRF) <- c("Accuracy", "Kappa", "Sensibilidad T1", "Especificidad T1", "Sensibilidad T2", "Especificidad T2", "Sensibilidad T3", "Especificidad T3")
+rownames(tablaRF) <- c("100 árboles", "200 árboles")
+```
+```{r echo=FALSE}
+kable(tablaRF) %>%
+  kable_styling(bootstrap_options = Form.Basic)%>%
+  row_spec(0, bold = T, color = "white", background = "seagreen3")%>%
+  column_spec(1, bold = T)
+```
+```{r include=FALSE}
+best_RF <- m200
+```
+
+# Conclusión
+
+Como hemos podido observar a lo largo de los diferentes subapartados, en general obtenemos unos clasificadores muy buenos, la mayoría con accuracys por encima del 90%. Tenemos unas métricas en generales muy buenas, seleccionando el mejor modelo de cada algoritmo, tenemos un resumen de los mejores modelos: 
+
+```{r echo=FALSE}
+tabla_mejores <- rbind(best_knn, best_NB,best_nn, best_VM, best_AC, best_RF)
+colnames(tabla_mejores) <- c("Accuracy", "Kappa", "Sensibilidad T1", "Especificidad T1", "Sensibilidad T2", "Especificidad T2", "Sensibilidad T3", "Especificidad T3")
+rownames(tabla_mejores) <- c("k-NN k=1", "NaiveBayes", "Red neural 50 y 30 nodos", "SVM kernel lineal", "AC boost = 10", "RF 200 árboles")
+kable(tabla_mejores) %>%
+  kable_styling(bootstrap_options = Form.Basic)%>%
+  row_spec(0, bold = T, color = "white", background = "seagreen3")%>%
+  column_spec(1, bold = T)
+
+```
+
+Como podemos observar en la tabla resumen, las medidas que más varían de un clasificador a otro son la especificidad y sensibilidad para detectar el tipo 2, especialmente su sensibilidad, ya que en la mayoría de algoritmos la especificidad se mantiene en 1. Esto no es sorprendente ya que, como observabamos en la gráfica inicial de componentes principales, los tipos 1 y 3 se separan perfectamente entre sí, sin embargo el tipo 2 se solapaba con ambos grupos. Esto se ve claramente en las matrices de confusión, donde vemos que las muestras mal clasificadas en la mayoría de los casos son muestras de tipo 2 identificadas como tipo 1 o tipo 3, pero en pocos algoritmos clasifica erróneamente un tipo 1 como tipo 3 o viceversa. 
+
+De todos nuestros algoritmos obtenemos unos resultados muy buenos, siendo los mas bajos de los árboles de clasificación. El resto de clasificadores tienen unas métricas muy iguales, destacando ligeramente por encima el algoritmo k-NN cuando la k toma el valor 1. Podemos concluir que, en este caso, y para nuestros datos, el algoritmo k-NN representa el mejor clasificador, ya que es el menos complejo además del más preciso. 
+
+
+
+
+
+
+
+
+
+
+
