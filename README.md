@@ -418,19 +418,17 @@ SkinSubtyping-RNAseq/
 │   ├── exploratory_analysis.R
 │   ├── preprocessing.R
 │   ├── knn.R
-│   ├── naive_bayes.R
-│   ├── neural_network.R
+│   ├── NaiveBayes.R
 │   ├── svm.R
 │   ├── classification_tree.R
 │   └── random_forest.R
+├── Python/
+│   ├── neural_network.ipynb
 │
 ├── figures/
 │   ├── exploratory/
 │   ├── pca/
 │   └── models/
-│
-├── results/
-│   └── model_comparison.csv
 │
 └── notebooks/
     └── SkinSubtyping-classifiers.Rmd
